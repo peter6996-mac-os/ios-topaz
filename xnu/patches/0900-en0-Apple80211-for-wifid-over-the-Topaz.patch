@@ -2363,9 +2363,7 @@ diff --git a/iokit/conf/files.arm64 b/iokit/conf/files.arm64
 index 60ec873..4d3730b 100644
 --- a/iokit/conf/files.arm64
 +++ b/iokit/conf/files.arm64
-@@ -15,6 +15,8 @@ iokit/Kernel/arm/TopazAudio.cpp                                  optional iokitc
- iokit/Kernel/arm/TopazRpm.cpp                                    optional iokitcpp
- iokit/Kernel/arm/SweetAMFIService.cpp                            optional iokitcpp
+@@ -15,4 +15,6 @@
  iokit/Kernel/arm/SweetBusy.cpp                                   optional iokitcpp
 +iokit/Kernel/arm/RedwoodWLAN.cpp                                 optional iokitcpp
 +iokit/Kernel/arm/MiniIONetworkStack.cpp                          optional iokitcpp
