@@ -116,10 +116,10 @@ index f469a3a..a956dd8 100644
  	    kIODirectionInOut | kIOMemoryPhysicallyContiguous, page_size, 0x00000000fffff000ull);
 diff --git a/iokit/Kernel/arm/TopazAdreno.cpp b/iokit/Kernel/arm/TopazAdreno.cpp
 new file mode 100644
-index 0000000..d90afa7
+index 0000000..9f5ec2d
 --- /dev/null
 +++ b/iokit/Kernel/arm/TopazAdreno.cpp
-@@ -0,0 +1,919 @@
+@@ -0,0 +1,931 @@
 +/*
 + * topaz: the Adreno 610 of the Redmi Note 12 4G (SM6225 "khaje") for programs
 + * to draw with, behind the hardware interface (redwood_gpu_*) that
@@ -149,6 +149,7 @@ index 0000000..d90afa7
 +extern "C" {
 +vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 +void sweet_dcache_clean(vm_offset_t addr, unsigned length);
++void sweet_dcache_flush(vm_offset_t addr, unsigned length);   /* osfmk/arm/caches.c: real dc civac */
 +int topaz_fw_read(const char *path, void **data, size_t *size);
 +void topaz_fw_free(void *data, size_t size);
 +int topaz_root_mounted(void);
@@ -276,8 +277,8 @@ index 0000000..d90afa7
 +kbuf_alloc(struct kbuf *b, uint64_t size)
 +{
 +	size = (size + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
-+	b->md = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
-+	    kIODirectionInOut | kIOMapWriteCombineCache, size, PAGE_SIZE);
++	/* no cache mode: IOBMD makes such buffers contiguous, from the lower DDR bank */
++	b->md = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task, kIODirectionInOut, size, PAGE_SIZE);
 +	if (b->md == NULL) {
 +		return false;
 +	}
@@ -285,6 +286,7 @@ index 0000000..d90afa7
 +	b->pa = kbuf_pa(b, 0);
 +	b->size = size;
 +	bzero(b->va, size);
++	sweet_dcache_clean((vm_offset_t)b->va, (unsigned)size);
 +	return true;
 +}
 +
@@ -452,6 +454,7 @@ index 0000000..d90afa7
 +		}
 +		IOLog("TopazGPU: zap: metadata at %#llx\n", meta.pa);
 +		memcpy(meta.va, mdt, mdt_size);
++		sweet_dcache_clean((vm_offset_t)meta.va, (unsigned)mdt_size);
 +		__asm__ volatile ("dsb sy" ::: "memory");
 +		scm(SCM_FN(SCM_SVC_PIL, PIL_SHUTDOWN), 1, GPU_PAS_ID, 0, 0, &res);
 +		st = scm(SCM_FN(SCM_SVC_PIL, PIL_INIT_IMAGE), 2 | (SCM_ARG_RW << 6), GPU_PAS_ID, meta.pa, 0, &res);
@@ -533,6 +536,7 @@ index 0000000..d90afa7
 +			return NULL;
 +		}
 +		l1.va[i1] = l2[i1].pa | PTE_VALID | PTE_TABLE;
++		sweet_dcache_clean((vm_offset_t)&l1.va[i1], 8);
 +	}
 +	if (l3[i3] == NULL) {
 +		struct table *t = (struct table *)IOMalloc(sizeof(*t));
@@ -544,6 +548,7 @@ index 0000000..d90afa7
 +		}
 +		l3[i3] = t;
 +		l2[i1].va[i2] = t->pa | PTE_VALID | PTE_TABLE;
++		sweet_dcache_clean((vm_offset_t)&l2[i1].va[i2], 8);
 +	}
 +	return l3[i3]->va;
 +}
@@ -565,6 +570,7 @@ index 0000000..d90afa7
 +		return false;
 +	}
 +	t[(va >> 12) & 511] = pa | PTE_PAGE | (ro ? PTE_AP_RO : 0);
++	sweet_dcache_clean((vm_offset_t)&t[(va >> 12) & 511], 8);
 +	tables_dirty = true;
 +	return true;
 +}
@@ -687,7 +693,7 @@ index 0000000..d90afa7
 +static void
 +kick(void)
 +{
-+	__asm__ volatile ("dsb sy" ::: "memory");
++	sweet_dcache_clean((vm_offset_t)ring.va, RB_BYTES);
 +	gpu_wr(0x807, wptr % RB_DWORDS);                /* CP_RB_WPTR */
 +}
 +
@@ -793,6 +799,7 @@ index 0000000..d90afa7
 +		return false;
 +	}
 +	memcpy(sqe.va, (const uint8_t *)fw + 4, fw_size - 4);
++	sweet_dcache_clean((vm_offset_t)sqe.va, (unsigned)(fw_size - 4));
 +	IOLog("TopazGPU: cp: SQE at GPU %#llx, ring %#llx\n", sqe.iova, ring.iova);
 +	tlb_flush();
 +	hw_init_regs();
@@ -901,6 +908,7 @@ index 0000000..d90afa7
 +		uint64_t *t = l3_for(address + off, false);
 +		if (t != NULL) {
 +			t[((address + off) >> 12) & 511] = 0;
++			sweet_dcache_clean((vm_offset_t)&t[((address + off) >> 12) & 511], 8);
 +		}
 +	}
 +	tlb_flush();
@@ -910,7 +918,7 @@ index 0000000..d90afa7
 +redwood_gpu_to_memory(void *start, uint64_t size)
 +{
 +	if (start != NULL && size != 0) {
-+		sweet_dcache_clean((vm_offset_t)start, (unsigned)size);
++		sweet_dcache_flush((vm_offset_t)start, (unsigned)size);    /* clean + invalidate */
 +	}
 +	__asm__ volatile ("dsb sy" ::: "memory");
 +}
@@ -918,7 +926,11 @@ index 0000000..d90afa7
 +bool
 +redwood_gpu_done(uint32_t fence)
 +{
-+	return mem.va != NULL && (int32_t)(*(volatile uint32_t *)mem.va - fence) >= 0;
++	if (mem.va == NULL) {
++		return false;
++	}
++	sweet_dcache_flush((vm_offset_t)mem.va, 64);
++	return (int32_t)(*(volatile uint32_t *)mem.va - fence) >= 0;
 +}
 +
 +uint32_t
